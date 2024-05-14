@@ -22,7 +22,7 @@
 use crate::calibration::{calculate_calibration, calibration_draw_point};
 pub use crate::{
     calibration::CalibrationPoint,
-    error::{BusError, Error},
+    error::Error,
     exti_pin::Xpt2046Exti,
 };
 use core::{fmt::Debug, ops::RemAssign};
@@ -32,7 +32,7 @@ use embedded_graphics_core::{
     pixelcolor::{Rgb565, RgbColor},
 };
 use embedded_hal::{
-    delay::DelayUs, digital::OutputPin,spi::SpiDevice
+    delay::DelayNs, spi::SpiDevice
 };
 
 #[cfg(feature = "with_defmt")]
@@ -182,11 +182,9 @@ impl TouchSamples {
 }
 
 #[derive(Debug)]
-pub struct Xpt2046<SPI, CS, PinIRQ> {
+pub struct Xpt2046<SPI, PinIRQ> {
     /// THe SPI interface
     spi: SPI,
-    /// Control pin
-    cs: CS,
     /// Interrupt control pin
     irq: PinIRQ,
     /// Internall buffers tx
@@ -204,16 +202,14 @@ pub struct Xpt2046<SPI, CS, PinIRQ> {
     calibration_point: CalibrationPoint,
 }
 
-impl<SPI, CS, PinIRQ> Xpt2046<SPI, CS, PinIRQ>
+impl<SPI, PinIRQ> Xpt2046<SPI, PinIRQ>
 where
     SPI: SpiDevice<u8>,
-    CS: OutputPin,
     PinIRQ: Xpt2046Exti,
 {
-    pub fn new(spi: SPI, cs: CS, irq: PinIRQ, orientation: Orientation) -> Self {
+    pub fn new(spi: SPI, irq: PinIRQ, orientation: Orientation) -> Self {
         Self {
             spi,
-            cs,
             irq,
             tx_buff: [0; TX_BUFF_LEN],
             rx_buff: [0; TX_BUFF_LEN],
@@ -226,30 +222,16 @@ where
     }
 }
 
-impl<SPI, CS, PinIRQ, SPIError, CSError> Xpt2046<SPI, CS, PinIRQ>
+impl<SPI, PinIRQ> Xpt2046<SPI, PinIRQ>
 where
-    SPI: SpiDevice<u8, Error = SPIError>,
-    CS: OutputPin<Error = CSError>,
+    SPI: SpiDevice<u8>,
     PinIRQ: Xpt2046Exti,
-    SPIError: Debug,
-    CSError: Debug,
 {
-    fn spi_read(&mut self) -> Result<(), Error<BusError<SPIError, CSError>>> {
-        self.cs
-            .set_low()
-            .map_err(|e| Error::Bus(BusError::Pin(e)))?;
-        self.spi
-            .transfer(&mut self.rx_buff, &self.tx_buff)
-            .map_err(|e| Error::Bus(BusError::Spi(e)))?;
-        self.cs
-            .set_high()
-            .map_err(|e| Error::Bus(BusError::Pin(e)))?;
-        Ok(())
-    }
 
     /// Read raw values from the XPT2046 driver
-    fn read_xy(&mut self) -> Result<Point, Error<BusError<SPIError, CSError>>> {
-        self.spi_read()?;
+    fn read_xy(&mut self) -> Result<Point, Error<SPI::Error>> {
+        self.spi.transfer(&mut self.rx_buff, &self.tx_buff)
+            .map_err(|e|Error::Bus(e))?;
 
         let x = (self.rx_buff[1] as i32) << 8 | self.rx_buff[2] as i32;
         let y = (self.rx_buff[3] as i32) << 8 | self.rx_buff[4] as i32;
@@ -257,7 +239,7 @@ where
     }
 
     /// Read the calibrated point of touch from XPT2046
-    fn read_touch_point(&mut self) -> Result<Point, Error<BusError<SPIError, CSError>>> {
+    fn read_touch_point(&mut self) -> Result<Point, Error<SPI::Error>> {
         let raw_point = self.read_xy()?;
 
         let (x, y) = match self.operation_mode {
@@ -297,13 +279,12 @@ where
     }
 
     /// Reset the driver and preload tx buffer with register data.
-    pub fn init<D: DelayUs>(
+    pub fn init<D: DelayNs>(
         &mut self,
         delay: &mut D,
-    ) -> Result<(), Error<BusError<SPIError, CSError>>> {
+    ) -> Result<(), SPI::Error> {
         self.tx_buff[0] = 0x80;
-        self.cs.set_high()?;
-        self.spi_read()?;
+        self.spi.transfer(&mut self.rx_buff, &self.tx_buff)?;
         delay.delay_ms(1);
 
         /*
@@ -328,7 +309,7 @@ where
     pub fn run(
         &mut self,
         exti: &mut PinIRQ::Exti,
-    ) -> Result<(), Error<BusError<SPIError, CSError>>> {
+    ) -> Result<(), Error<SPI::Error>> {
         match self.screen_state {
             TouchScreenState::IDLE => {
                 if self.operation_mode == TouchScreenOperationMode::CALIBRATION && self.irq.is_low()
@@ -403,10 +384,10 @@ where
         dt: &mut DT,
         delay: &mut DELAY,
         exti: &mut PinIRQ::Exti,
-    ) -> Result<(), Error<BusError<SPIError, CSError>>>
+    ) -> Result<(), Error<SPI::Error>>
     where
         DT: DrawTarget<Color = Rgb565>,
-        DELAY: DelayUs,
+        DELAY: DelayNs,
     {
         let mut calibration_count = 0;
         let mut retry = 3;
